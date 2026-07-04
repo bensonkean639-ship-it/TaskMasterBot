@@ -3,7 +3,7 @@ import logging
 import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 
 # Setup logging
 logging.basicConfig(
@@ -21,6 +21,10 @@ if not BOT_TOKEN:
 # Data storage
 user_reminders = {}
 user_todos = {}
+
+# Conversation states
+REMINDER_MESSAGE, REMINDER_TIME = range(2)
+TODO_MESSAGE = range(1)
 
 def format_time(dt):
     return dt.strftime("%Y-%m-%d %H:%M")
@@ -60,61 +64,78 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong! Bot is running!")
 
-# ========== REMINDERS ==========
+# ========== REMINDERS (Using ConversationHandler) ==========
 
-async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['step'] = 'reminder_message'
+async def remind_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start reminder setup"""
     await update.message.reply_text(
         "📝 Send me your reminder message:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_reminder")]
         ])
     )
+    return REMINDER_MESSAGE
 
-async def handle_reminder_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('step') == 'reminder_message':
-        context.user_data['msg'] = update.message.text
-        context.user_data['step'] = 'reminder_time'
-        await update.message.reply_text(
-            "⏰ Send the time (YYYY-MM-DD HH:MM)\nExample: 2026-07-05 15:30"
-        )
+async def remind_get_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get reminder message"""
+    context.user_data['reminder_message'] = update.message.text
+    await update.message.reply_text(
+        "⏰ Send the time (YYYY-MM-DD HH:MM)\nExample: 2026-07-05 15:30",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_reminder")]
+        ])
+    )
+    return REMINDER_TIME
 
-async def handle_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('step') == 'reminder_time':
-        user_id = update.effective_user.id
-        time_str = update.message.text
-        reminder_time = parse_time(time_str)
-        
-        if not reminder_time:
-            await update.message.reply_text("❌ Invalid format! Use YYYY-MM-DD HH:MM")
-            return
-        
-        if reminder_time < datetime.now():
-            await update.message.reply_text("❌ Time must be in the future!")
-            return
-        
-        if user_id not in user_reminders:
-            user_reminders[user_id] = []
-        
-        reminder_id = len(user_reminders[user_id]) + 1
-        reminder = {
-            'id': reminder_id,
-            'message': context.user_data.get('msg', 'No message'),
-            'time': reminder_time
-        }
-        user_reminders[user_id].append(reminder)
-        
-        context.user_data['step'] = None
-        context.user_data['msg'] = None
-        
-        await update.message.reply_text(
-            f"✅ Reminder set!\n\n📝 {reminder['message']}\n⏰ {format_time(reminder_time)}\n🆔 ID: {reminder_id}"
-        )
+async def remind_get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get reminder time and save"""
+    user_id = update.effective_user.id
+    time_str = update.message.text
+    reminder_time = parse_time(time_str)
+    
+    if not reminder_time:
+        await update.message.reply_text("❌ Invalid format! Use YYYY-MM-DD HH:MM")
+        return REMINDER_TIME
+    
+    if reminder_time < datetime.now():
+        await update.message.reply_text("❌ Time must be in the future!")
+        return REMINDER_TIME
+    
+    if user_id not in user_reminders:
+        user_reminders[user_id] = []
+    
+    reminder_id = len(user_reminders[user_id]) + 1
+    reminder = {
+        'id': reminder_id,
+        'message': context.user_data.get('reminder_message', 'No message'),
+        'time': reminder_time
+    }
+    user_reminders[user_id].append(reminder)
+    
+    await update.message.reply_text(
+        f"✅ Reminder set!\n\n"
+        f"📝 {reminder['message']}\n"
+        f"⏰ {format_time(reminder_time)}\n"
+        f"🆔 ID: {reminder_id}"
+    )
+    
+    # Clear user data
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel reminder setup"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Reminder cancelled")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 async def view_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all reminders"""
     user_id = update.effective_user.id
     if user_id not in user_reminders or not user_reminders[user_id]:
-        await update.message.reply_text("📭 No reminders")
+        await update.message.reply_text("📭 You have no reminders set.")
         return
     
     text = "📋 Your Reminders:\n\n"
@@ -123,39 +144,48 @@ async def view_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text)
 
-# ========== TODOS ==========
+# ========== TODOS (Using ConversationHandler) ==========
 
-async def todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['step'] = 'todo_message'
+async def todo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start todo setup"""
     await update.message.reply_text(
         "📝 Send me your todo item:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_todo")]
         ])
     )
+    return TODO_MESSAGE
 
-async def handle_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('step') == 'todo_message':
-        user_id = update.effective_user.id
-        text = update.message.text
-        
-        if user_id not in user_todos:
-            user_todos[user_id] = []
-        
-        todo_id = len(user_todos[user_id]) + 1
-        user_todos[user_id].append({
-            'id': todo_id,
-            'text': text,
-            'done': False
-        })
-        
-        context.user_data['step'] = None
-        await update.message.reply_text(f"✅ Todo added! (ID: {todo_id})")
+async def todo_get_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get todo message and save"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if user_id not in user_todos:
+        user_todos[user_id] = []
+    
+    todo_id = len(user_todos[user_id]) + 1
+    user_todos[user_id].append({
+        'id': todo_id,
+        'text': text,
+        'done': False
+    })
+    
+    await update.message.reply_text(f"✅ Todo added! (ID: {todo_id})")
+    return ConversationHandler.END
+
+async def cancel_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel todo setup"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Todo cancelled")
+    return ConversationHandler.END
 
 async def view_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all todos"""
     user_id = update.effective_user.id
     if user_id not in user_todos or not user_todos[user_id]:
-        await update.message.reply_text("📭 No todos")
+        await update.message.reply_text("📭 Your todo list is empty!")
         return
     
     text = "📋 Your Todos:\n\n"
@@ -166,6 +196,7 @@ async def view_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 async def done_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mark todo as done"""
     user_id = update.effective_user.id
     if user_id not in user_todos:
         await update.message.reply_text("📭 No todos")
@@ -173,20 +204,21 @@ async def done_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     pending = [t for t in user_todos[user_id] if not t['done']]
     if not pending:
-        await update.message.reply_text("🎉 All done!")
+        await update.message.reply_text("🎉 All your todos are done!")
         return
     
     keyboard = []
     for t in pending:
-        keyboard.append([InlineKeyboardButton(t['text'], callback_data=f"done_{t['id']}")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+        keyboard.append([InlineKeyboardButton(f"{t['id']}: {t['text']}", callback_data=f"done_{t['id']}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_done")])
     
     await update.message.reply_text(
-        "✅ Select todo to mark as done:",
+        "✅ Select a todo to mark as done:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def delete_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete todo"""
     user_id = update.effective_user.id
     if user_id not in user_todos or not user_todos[user_id]:
         await update.message.reply_text("📭 No todos")
@@ -194,29 +226,30 @@ async def delete_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     for t in user_todos[user_id]:
-        keyboard.append([InlineKeyboardButton(t['text'], callback_data=f"delete_{t['id']}")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+        keyboard.append([InlineKeyboardButton(f"{t['id']}: {t['text']}", callback_data=f"delete_{t['id']}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")])
     
     await update.message.reply_text(
-        "🗑️ Select todo to delete:",
+        "🗑️ Select a todo to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # ========== CALLBACKS ==========
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all button callbacks"""
     query = update.callback_query
     await query.answer()
     
     user_id = update.effective_user.id
     data = query.data
     
-    if data == "cancel":
-        context.user_data['step'] = None
-        context.user_data['msg'] = None
+    # Handle cancellations
+    if data == "cancel_done" or data == "cancel_delete":
         await query.edit_message_text("❌ Cancelled")
         return
     
+    # Handle done
     if data.startswith("done_"):
         todo_id = int(data.split("_")[1])
         for t in user_todos.get(user_id, []):
@@ -224,43 +257,63 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 t['done'] = True
                 await query.edit_message_text(f"✅ Done: {t['text']}")
                 break
+        return
     
+    # Handle delete
     if data.startswith("delete_"):
         todo_id = int(data.split("_")[1])
         if user_id in user_todos:
             user_todos[user_id] = [t for t in user_todos[user_id] if t['id'] != todo_id]
             await query.edit_message_text("🗑️ Deleted")
+        return
 
 # ========== ERROR ==========
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
     if update and update.effective_message:
-        await update.effective_message.reply_text("❌ Error occurred")
+        await update.effective_message.reply_text("❌ Error occurred. Please try again.")
 
 # ========== MAIN ==========
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # ===== REMINDER CONVERSATION =====
+    remind_conv = ConversationHandler(
+        entry_points=[CommandHandler('remind', remind_start)],
+        states={
+            REMINDER_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_get_message)],
+            REMINDER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_get_time)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_reminder), CallbackQueryHandler(cancel_reminder, pattern='cancel_reminder')]
+    )
+    
+    # ===== TODO CONVERSATION =====
+    todo_conv = ConversationHandler(
+        entry_points=[CommandHandler('todo', todo_start)],
+        states={
+            TODO_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, todo_get_message)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_todo), CallbackQueryHandler(cancel_todo, pattern='cancel_todo')]
+    )
+    
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ping", ping))
-    app.add_handler(CommandHandler("remind", remind))
+    app.add_handler(remind_conv)  # Full reminder conversation
+    app.add_handler(todo_conv)    # Full todo conversation
     app.add_handler(CommandHandler("reminders", view_reminders))
-    app.add_handler(CommandHandler("todo", todo))
     app.add_handler(CommandHandler("mytodos", view_todos))
     app.add_handler(CommandHandler("done", done_todo))
     app.add_handler(CommandHandler("delete", delete_todo))
     
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_time))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_todo))
-    
+    # Callback handler for all buttons
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
     
-    logger.info("🚀 Bot started!")
+    logger.info("🚀 Bot started successfully!")
     app.run_polling()
 
 if __name__ == "__main__":
